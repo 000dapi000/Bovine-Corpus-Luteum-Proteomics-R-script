@@ -725,64 +725,152 @@ cat("✔ Output folder:", output_dir, "\n")
 ################################################################################
 ################################################################################
 
+################################################################################
+#                                PCA ANALYSIS                                   #
+#        mixOmics-based PCA with Elbow Plot + Colored Ellipses + Borders        #
+#                     All 2D Component Comparisons (T1–T10)                     #
+################################################################################
+
+# ---- [Load Libraries] ----
+library(mixOmics)
 library(ggplot2)
 library(dplyr)
 library(ggrepel)
+library(tidyr)
 
-# 1. Run PCA
-pca_res <- prcomp(X, center = TRUE, scale. = TRUE)
-var_explained <- (pca_res$sdev)^2 / sum(pca_res$sdev^2) * 100
+# ---- [Create Output Directory] ----
+pca_output_dir <- "PCA_2D_Plots_T1_T10"
+dir.create(pca_output_dir, showWarnings = FALSE)
 
-# 2. Prepare Data Frame
-plot_data <- data.frame(
-  PC1 = pca_res$x[,1],
-  PC2 = pca_res$x[,2],
-  Group = Y,
-  Sample = rownames(X)
+# ---- [Prepare Data] ----
+sample_cols <- c(
+  paste0("T1_", 1:8), paste0("T2_", 1:8), paste0("T3_", 1:8), paste0("T4_", 1:8),
+  paste0("T5_", 1:8), paste0("T6_", 1:8), paste0("T7_", 1:8), paste0("T8_", 1:8),
+  paste0("T9_", 1:8), paste0("T10_", 1:8)
 )
 
-# 3. Group colors (same as sPLS-DA)
+X <- as.data.frame(t(quantile_norm_data[, sample_cols]))  # samples × proteins
+Y <- factor(sub("_.*", "", rownames(X)), levels = paste0("T", 1:10))
+
+# ---- [Color Palette for T1–T10] ----
 group_colors <- c(
   "T1" = "#66c2a5", "T2" = "#ffd92f", "T3" = "#8da0cb", "T4" = "#fc8d62", "T5" = "#a6cee3",
   "T6" = "#1f78b4", "T7" = "#ffb347", "T8" = "#b3de69", "T9" = "#bdbdbd", "T10" = "#bc80bd"
 )
 
-# 4. Compute centroids for labeling
-group_centroids <- plot_data %>%
-  group_by(Group) %>%
-  summarise(PC1 = mean(PC1), PC2 = mean(PC2), count = n(), .groups = "drop")
+# ---- [Run PCA using mixOmics] ----
+set.seed(1)
+pca_res <- pca(X, ncomp = min(ncol(X), 15), center = TRUE, scale = TRUE)
 
-# 5. Plot
-p <- ggplot(plot_data, aes(x = PC1, y = PC2, color = Group, fill = Group)) +
-  geom_point(size = 4, alpha = 0.9) +
-  stat_ellipse(aes(group = Group, fill = Group), 
-               type = "norm", level = 0.95, alpha = 0.2, geom = "polygon", color = NA) +
-  stat_ellipse(aes(group = Group, color = Group), 
-               type = "norm", level = 0.95, size = 1, fill = NA, geom = "path") +
-  geom_text_repel(data = group_centroids,
-                  aes(label = paste0(Group, "\n(n=", count, ")")),
-                  color = "black", size = 5, fontface = "bold",
-                  max.overlaps = 100, box.padding = 0.6, point.padding = 0.6, segment.size = 0.5) +
-  scale_color_manual(values = group_colors) +
-  scale_fill_manual(values = group_colors) +
+# ---- [Extract Variance Explained] ----
+var_explained <- pca_res$prop_expl_var$X * 100  # %
+
+# ---- [Elbow Plot] ----
+elbow_df <- data.frame(
+  PC = 1:length(var_explained),
+  Variance = var_explained,
+  Cumulative = cumsum(var_explained)
+)
+
+gg_elbow <- ggplot(elbow_df, aes(x = PC, y = Variance)) +
+  geom_line(color = "#1f78b4", linewidth = 1.2) +
+  geom_point(size = 3, color = "#1f78b4") +
+  geom_text(aes(label = sprintf("%.1f%%", Variance)), vjust = -0.6, size = 4) +
+  geom_line(aes(y = Cumulative / max(Cumulative) * max(Variance)), 
+            color = "gray40", linetype = "dashed", linewidth = 0.9) +
+  scale_x_continuous(breaks = 1:length(var_explained)) +
   labs(
-    title = "PCA: (PC1 vs PC2)",
-    x = paste0("PC1 (", round(var_explained[1], 1), "%)"),
-    y = paste0("PC2 (", round(var_explained[2], 1), "%)")
+    title = "PCA Elbow Plot (mixOmics)",
+    x = "Principal Component",
+    y = "Variance Explained (%)"
   ) +
-  theme_minimal(base_size = 22) +
+  theme_minimal(base_size = 16) +
   theme(
     panel.border = element_rect(color = "black", fill = NA, linewidth = 1),
-    axis.title = element_text(face = "bold"),
-    plot.title = element_text(size = 24, face = "bold", hjust = 0.5),
-    legend.title = element_text(size = 20, face = "bold"),
-    legend.text = element_text(size = 18),
-    legend.position = "bottom"
+    plot.title = element_text(face = "bold", hjust = 0.5)
   )
 
-print(p)
-ggsave("PCA_T1-T10_PC1_vs_PC2_sPLSDAstyle.png", p, dpi = 300, width = 8, height = 8, bg = "white")
+print(gg_elbow)
+ggsave(file.path(pca_output_dir, "PCA_Elbow_Plot_T1_T10_mixOmics.png"),
+       gg_elbow, width = 8, height = 6, dpi = 300, bg = "white")
 
+# ---- [Determine Optimal Components] ----
+optimal_ncomp <- min(which(elbow_df$Cumulative >= 90))
+if (is.infinite(optimal_ncomp)) optimal_ncomp <- 2
+cat("✅ Optimal number of components based on cumulative variance:", optimal_ncomp, "\n")
+
+# ---- [Extract Scores for Selected PCs] ----
+pca_scores <- as.data.frame(pca_res$variates$X[, 1:optimal_ncomp])
+pca_scores$Group <- Y
+pca_scores$Sample <- rownames(X)
+
+# ---- [Function: PCA Plot with Matching Fill + Border Colors] ----
+plot_pca_2d <- function(df, pcx, pcy, var_explained, group_colors, output_dir) {
+  pcx_name <- paste0("PC", pcx)
+  pcy_name <- paste0("PC", pcy)
+  
+  centroids <- df %>%
+    group_by(Group) %>%
+    summarise(
+      !!pcx_name := mean(.data[[pcx_name]]),
+      !!pcy_name := mean(.data[[pcy_name]]),
+      count = n(),
+      .groups = "drop"
+    )
+  
+  # Each ellipse will use its group color for both fill and border
+  p <- ggplot(df, aes_string(x = pcx_name, y = pcy_name)) +
+    geom_point(aes(color = Group), size = 4, alpha = 0.9) +
+    # Filled ellipse + border same color as group
+    stat_ellipse(aes(color = Group, fill = Group, group = Group),
+                 type = "norm", level = 0.95, geom = "polygon",
+                 alpha = 0.35, linewidth = 1.2) +
+    geom_text_repel(data = centroids,
+                    aes(label = paste0(Group, "\n(n=", count, ")")),
+                    color = "black", size = 5, fontface = "bold",
+                    max.overlaps = 100, box.padding = 0.6, point.padding = 0.6) +
+    scale_color_manual(values = group_colors) +
+    scale_fill_manual(values = group_colors) +
+    labs(
+      title = paste0("PCA: (", pcx_name, " vs ", pcy_name, ")"),
+      x = paste0(pcx_name, " (", round(var_explained[pcx], 1), "%)"),
+      y = paste0(pcy_name, " (", round(var_explained[pcy], 1), "%)")
+    ) +
+    theme_minimal(base_size = 22) +
+    theme(
+      panel.border = element_rect(color = "black", fill = NA, linewidth = 1),
+      plot.title = element_text(face = "bold", hjust = 0.5),
+      axis.title = element_text(face = "bold"),
+      legend.title = element_text(size = 18, face = "bold"),
+      legend.text = element_text(size = 16),
+      legend.position = "bottom"
+    )
+  
+  out_name <- paste0("PCA_T1-T10_", pcx_name, "_vs_", pcy_name, ".png")
+  ggsave(file.path(output_dir, out_name), p, width = 8, height = 8, dpi = 300, bg = "white")
+  return(p)
+}
+
+# ---- [Generate All PCA 2D Plots: All Component Comparisons] ----
+for (i in 1:(optimal_ncomp - 1)) {
+  for (j in (i + 1):optimal_ncomp) {
+    plot_pca_2d(pca_scores, i, j, var_explained, group_colors, pca_output_dir)
+  }
+}
+
+cat("\n✅ All PCA 2D plots (mixOmics, All PCs, Filled + Colored Borders) saved in folder:", pca_output_dir, "\n")
+
+# ---- [Summary Report] ----
+cat("\n📊 PCA Summary Report (mixOmics)\n")
+cat("──────────────────────────────────────\n")
+cat("✔ Total Components Computed:", length(var_explained), "\n")
+cat("✔ Optimal Components (≥90% cumulative variance):", optimal_ncomp, "\n")
+cat("✔ Variance Explained (First 5 PCs):", paste0(round(var_explained[1:5], 1), collapse = "%, "), "%\n")
+cat("✔ Output Folder:", pca_output_dir, "\n")
+
+################################################################################
+# End of PCA Section
+################################################################################
 
 
 ################################################################################
